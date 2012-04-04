@@ -9,10 +9,10 @@ use B::Compiling qw( PL_compiling );
 use B::CallChecker qw(
 	cv_get_call_checker
 	cv_set_call_checker
-	ck_entersub_args_proto
 );
+use Sub::Identify qw(sub_fullname);
 
-our $VERSION = "1.00";
+our $VERSION = "2.00";
 
 =head1 NAME
 
@@ -22,8 +22,8 @@ Devel::CompiledCalls - show where calls to a named subroutine are compiled
 
   # from the shell
   shell$ perl -c -MDevel::CompiledCalls=Data::Dumper::Dumper myscript.pl
-  Data::Dumper::Dumper call at line 4 of myscript.pl
-  Data::Dumper::Dumper call at line 5 of myscript.pl
+  Data::Dumper::Dumper call at myscript.pl line 4.
+  Data::Dumper::Dumper call at myscript.pl line 5.
   myscript.pl syntax OK
 
   # from within a Perl script
@@ -70,12 +70,20 @@ be installed.
 =head2 Custom callbacks
 
 Custom callbacks can be installed with the C<attach_callback> subroutine.
+This routine is not exported and must be called with a fully qualified
+function call.
 
 =over
 
+=item attach_callback( $subroutine_ref, $callback )
+
 =item attach_callback( $subroutine_name, $callback )
 
-The callback will be called whenever a call to the named subroutine is compiled.
+The callback will be called whenever a call to the subroutine is compiled.  The
+subroutine can either be passed by reference, by fully qualified name (including
+the package,) or by just the subroutine name (in which case it will be assumed
+to be in the same package as C<attach_callback> is called from.)
+
 The callback will be executed with three parameters: The name of the subroutine,
 the filename of the source file, and the the line of the sourcefile that
 contains the subroutine.
@@ -87,8 +95,9 @@ contains the subroutine.
 sub import {
 	shift;
 	attach_callback($_, sub {
-		my ($name, $file, $line) = @_;
-		print {*STDERR} "$name call at line $line of $file\n";
+		my ($name, $file, $line,$stash) = @_;
+		local $\ = undef;  # locally reset back to default just in case
+		print {*STDERR} "$name call at $file line $line.\n";
 	}) foreach @_;
 	return;
 }
@@ -97,9 +106,23 @@ sub attach_callback {
 	my $name = shift;
 	my $callback = shift;
 
+	# check for an unqualifed subroutine name.  If we have one
+	# then we need to give it our *caller's* package (or, potentially
+	# our caller's caller package
+	my $fully_qualified_name =
+		ref $name eq "CODE" ? $name :
+		$name =~ /::/x      ? $name  : do {
+			my $caller_package;
+			my $level = 1;
+			do { ($caller_package) = caller($level++) }
+				while ($caller_package eq __PACKAGE__);
+			$caller_package.'::'.$name;
+		};
+	$name = sub_fullname($name) if ref($name) eq "CODE";
+
 	# get the sub (this will spring into existence with autovivication
 	# if needed)
-	my $uboat = do { no strict 'subs'; \&{$name} };
+	my $uboat = do { no strict 'subs'; \&{$fully_qualified_name} };
 
 	# work out what original check would have been made
 	my ($original_check, $data) = cv_get_call_checker($uboat);
@@ -132,7 +155,8 @@ compiled until that point.  A similar problem happens with modules that are
 loaded at runtime on demand;  Until the module is loaded the code is not
 compiled and nothing is printed until such compilation happens.
 
-Also, this module can't find calls that are constructed by accessing the
+Also, this module can't find calls that are constructed in any way other
+than standard function calling.  For example accessing the
 symbolic name of the function directly.  This won't print anything:
 
    use Devel::CompiledCalls qw(foo);
@@ -140,7 +164,16 @@ symbolic name of the function directly.  This won't print anything:
    my $uboat = \&{"foo"};
    $uboat->();
 
-As no subroutine call is actually compiled. 
+As no subroutine call is actually compiled.  Similarly this won't print
+anything either:
+
+   use Devel::CompiledCalls qw(foo);
+   sub foo  { ... }
+   &foo;
+   &foo("whatever");
+
+Because the use of the C<&> sigil disables prototype checking which is
+what we're hooking to record the call.
 
 Using this module has the effect of making the subroutine we are hooking
 "exist".  i.e.
